@@ -283,6 +283,12 @@ class TestBackend(object):
         check_single_tensor_operation('prod', (4, 2), axis=1, keepdims=True)
         check_single_tensor_operation('prod', (4, 2, 3), axis=[1, -1])
 
+        check_single_tensor_operation('cumsum', (4, 2))
+        check_single_tensor_operation('cumsum', (4, 2), axis=1)
+
+        check_single_tensor_operation('cumprod', (4, 2))
+        check_single_tensor_operation('cumprod', (4, 2), axis=1)
+
         # does not work yet, wait for bool <-> int casting in TF (coming soon)
         # check_single_tensor_operation('any', (4, 2))
         # check_single_tensor_operation('any', (4, 2), axis=1, keepdims=True)
@@ -981,15 +987,25 @@ class TestBackend(object):
     def test_map(self):
         x = np.random.rand(10, 3).astype(np.float32)
         for K in [KTF, KTH]:
-            kx = K.eval(K.map_fn(K.sum, x))
+            vx = K.variable(x)
+            kx = K.eval(K.map_fn(K.sum, vx))
+            # make sure we can also walk the indexes in tensorflow which we
+            # can't without specifying dtype
+            kx2 = K.eval(K.map_fn(
+                lambda i: K.sum(vx[i]),
+                K.arange(10),
+                dtype=K.floatx()
+            ))
 
             assert (10,) == kx.shape
+            assert (10,) == kx2.shape
             assert_allclose(x.sum(axis=1), kx, atol=1e-05)
+            assert_allclose(kx, kx2, atol=1e-05)
 
     def test_foldl(self):
         x = np.random.rand(10, 3).astype(np.float32)
         for K in [KTF, KTH]:
-            kx = K.eval(K.foldl(lambda a, b: a + b, x))
+            kx = K.eval(K.foldl(lambda a, b: a + b, K.variable(x)))
 
             assert (3,) == kx.shape
             assert_allclose(x.sum(axis=0), kx, atol=1e-05)
@@ -1001,8 +1017,9 @@ class TestBackend(object):
         # right to left we have no such problem and the result is larger
         x = np.array([1e-20, 1e-20, 10, 10, 10], dtype=np.float32)
         for K in [KTF, KTH]:
-            p1 = K.eval(K.foldl(lambda a, b: a * b, x))
-            p2 = K.eval(K.foldr(lambda a, b: a * b, x))
+            vx = K.variable(x)
+            p1 = K.eval(K.foldl(lambda a, b: a * b, vx))
+            p2 = K.eval(K.foldr(lambda a, b: a * b, vx))
 
             assert p1 < p2
             assert 9e-38 < p2 <= 1e-37
