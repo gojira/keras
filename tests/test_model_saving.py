@@ -2,11 +2,12 @@ import pytest
 import os
 import tempfile
 import numpy as np
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_raises
 
 from keras import backend as K
 from keras.models import Model, Sequential
-from keras.layers import Dense, Lambda, RepeatVector, TimeDistributed
+from keras.layers import Dense, Lambda, RepeatVector, TimeDistributed, LSTM
+from keras.layers import Conv2D, Flatten
 from keras.layers import Input
 from keras import optimizers
 from keras import losses
@@ -78,13 +79,13 @@ def test_sequential_model_saving_2():
 
 @keras_test
 def test_functional_model_saving():
-    input = Input(shape=(3,))
-    x = Dense(2)(input)
-    output = Dense(3)(x)
+    inputs = Input(shape=(3,))
+    x = Dense(2)(inputs)
+    outputs = Dense(3)(x)
 
-    model = Model(input, output)
+    model = Model(inputs, outputs)
     model.compile(loss=losses.MSE,
-                  optimizer=optimizers.RMSprop(lr=0.0001),
+                  optimizer=optimizers.Adam(),
                   metrics=[metrics.categorical_accuracy])
     x = np.random.random((1, 3))
     y = np.random.random((1, 3))
@@ -103,12 +104,12 @@ def test_functional_model_saving():
 
 @keras_test
 def test_saving_multiple_metrics_outputs():
-    input = Input(shape=(5,))
-    x = Dense(5)(input)
+    inputs = Input(shape=(5,))
+    x = Dense(5)(inputs)
     output1 = Dense(1, name='output1')(x)
     output2 = Dense(1, name='output2')(x)
 
-    model = Model(inputs=input, outputs=[output1, output2])
+    model = Model(inputs=inputs, outputs=[output1, output2])
 
     metrics = {'output1': ['mse', 'binary_accuracy'],
                'output2': ['mse', 'binary_accuracy']
@@ -159,7 +160,21 @@ def test_saving_right_after_compilation():
 
 
 @keras_test
-def test_loading_weights_by_name():
+def test_saving_unused_layers_is_ok():
+    a = Input(shape=(256, 512, 6))
+    b = Input(shape=(256, 512, 1))
+    c = Lambda(lambda x: x[:, :, :, :1])(a)
+
+    model = Model(inputs=[a, b], outputs=c)
+
+    _, fname = tempfile.mkstemp('.h5')
+    save_model(model, fname)
+    load_model(fname)
+    os.remove(fname)
+
+
+@keras_test
+def test_loading_weights_by_name_and_reshape():
     """
     test loading model weights by name on:
         - sequential model
@@ -171,11 +186,12 @@ def test_loading_weights_by_name():
 
     # sequential model
     model = Sequential()
-    model.add(Dense(2, input_shape=(3,), name='rick'))
+    model.add(Conv2D(2, (1, 1), input_shape=(1, 1, 1), name='rick'))
+    model.add(Flatten())
     model.add(Dense(3, name='morty'))
     model.compile(loss=custom_loss, optimizer=custom_opt(), metrics=['acc'])
 
-    x = np.random.random((1, 3))
+    x = np.random.random((1, 1, 1, 1))
     y = np.random.random((1, 3))
     model.train_on_batch(x, y)
 
@@ -188,20 +204,27 @@ def test_loading_weights_by_name():
     # delete and recreate model
     del(model)
     model = Sequential()
-    model.add(Dense(2, input_shape=(3,), name='rick'))
-    model.add(Dense(3, name='morty'))
+    model.add(Conv2D(2, (1, 1), input_shape=(1, 1, 1), name='rick'))
+    model.add(Conv2D(3, (1, 1), name='morty'))
     model.compile(loss=custom_loss, optimizer=custom_opt(), metrics=['acc'])
 
     # load weights from first model
-    model.load_weights(fname, by_name=True)
+    with pytest.raises(ValueError):
+        model.load_weights(fname, by_name=True, reshape=False)
+    with pytest.raises(ValueError):
+        model.load_weights(fname, by_name=False, reshape=False)
+    model.load_weights(fname, by_name=False, reshape=True)
+    model.load_weights(fname, by_name=True, reshape=True)
     os.remove(fname)
 
     out2 = model.predict(x)
-    assert_allclose(out, out2, atol=1e-05)
+    assert_allclose(np.squeeze(out), np.squeeze(out2), atol=1e-05)
     for i in range(len(model.layers)):
         new_weights = model.layers[i].get_weights()
         for j in range(len(new_weights)):
-            assert_allclose(old_weights[i][j], new_weights[j], atol=1e-05)
+            # only compare layers that have weights, skipping Flatten()
+            if old_weights[i]:
+                assert_allclose(old_weights[i][j], new_weights[j], atol=1e-05)
 
 
 @keras_test
@@ -263,6 +286,54 @@ def test_loading_weights_by_name_2():
     assert_allclose(np.zeros_like(jessica[1]), jessica[1])  # biases init to 0
 
 
+@keras_test
+def test_loading_weights_by_name_skip_mismatch():
+    """
+    test skipping layers while loading model weights by name on:
+        - sequential model
+    """
+
+    # test with custom optimizer, loss
+    custom_opt = optimizers.rmsprop
+    custom_loss = losses.mse
+
+    # sequential model
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,), name='rick'))
+    model.add(Dense(3, name='morty'))
+    model.compile(loss=custom_loss, optimizer=custom_opt(), metrics=['acc'])
+
+    x = np.random.random((1, 3))
+    y = np.random.random((1, 3))
+    model.train_on_batch(x, y)
+
+    out = model.predict(x)
+    old_weights = [layer.get_weights() for layer in model.layers]
+    _, fname = tempfile.mkstemp('.h5')
+
+    model.save_weights(fname)
+
+    # delete and recreate model
+    del(model)
+    model = Sequential()
+    model.add(Dense(2, input_shape=(3,), name='rick'))
+    model.add(Dense(4, name='morty'))  # different shape w.r.t. previous model
+    model.compile(loss=custom_loss, optimizer=custom_opt(), metrics=['acc'])
+
+    # load weights from first model
+    with pytest.warns(UserWarning):  # expect UserWarning for skipping weights
+        model.load_weights(fname, by_name=True, skip_mismatch=True)
+    os.remove(fname)
+
+    # assert layers 'rick' are equal
+    for old, new in zip(old_weights[0], model.layers[0].get_weights()):
+        assert_allclose(old, new, atol=1e-05)
+
+    # assert layers 'morty' are not equal, since we skipped loading this layer
+    for old, new in zip(old_weights[1], model.layers[1].get_weights()):
+        assert_raises(AssertionError, assert_allclose, old, new, atol=1e-05)
+
+
 # a function to be called from the Lambda layer
 def square_fn(x):
     return x * x
@@ -270,11 +341,11 @@ def square_fn(x):
 
 @keras_test
 def test_saving_lambda_custom_objects():
-    input = Input(shape=(3,))
-    x = Lambda(lambda x: square_fn(x), output_shape=(3,))(input)
-    output = Dense(3)(x)
+    inputs = Input(shape=(3,))
+    x = Lambda(lambda x: square_fn(x), output_shape=(3,))(inputs)
+    outputs = Dense(3)(x)
 
-    model = Model(input, output)
+    model = Model(inputs, outputs)
     model.compile(loss=losses.MSE,
                   optimizer=optimizers.RMSprop(lr=0.0001),
                   metrics=[metrics.categorical_accuracy])
@@ -297,10 +368,10 @@ def test_saving_lambda_custom_objects():
 def test_saving_lambda_numpy_array_arguments():
     mean = np.random.random((4, 2, 3))
     std = np.abs(np.random.random((4, 2, 3))) + 1e-5
-    input = Input(shape=(4, 2, 3))
-    output = Lambda(lambda image, mu, std: (image - mu) / std,
-                    arguments={'mu': mean, 'std': std})(input)
-    model = Model(input, output)
+    inputs = Input(shape=(4, 2, 3))
+    outputs = Lambda(lambda image, mu, std: (image - mu) / std,
+                     arguments={'mu': mean, 'std': std})(inputs)
+    model = Model(inputs, outputs)
     model.compile(loss='mse', optimizer='sgd', metrics=['acc'])
 
     _, fname = tempfile.mkstemp('.h5')
@@ -335,6 +406,42 @@ def test_saving_custom_activation_function():
 
     out2 = model.predict(x)
     assert_allclose(out, out2, atol=1e-05)
+
+
+@keras_test
+def test_saving_recurrent_layer_with_init_state():
+    vector_size = 8
+    input_length = 20
+
+    input_initial_state = Input(shape=(vector_size,))
+    input_x = Input(shape=(input_length, vector_size))
+
+    lstm = LSTM(vector_size, return_sequences=True)(
+        input_x, initial_state=[input_initial_state, input_initial_state])
+
+    model = Model(inputs=[input_x, input_initial_state], outputs=[lstm])
+
+    _, fname = tempfile.mkstemp('.h5')
+    model.save(fname)
+
+    loaded_model = load_model(fname)
+    os.remove(fname)
+
+
+@keras_test
+def test_saving_recurrent_layer_without_bias():
+    vector_size = 8
+    input_length = 20
+
+    input_x = Input(shape=(input_length, vector_size))
+    lstm = LSTM(vector_size, use_bias=False)(input_x)
+    model = Model(inputs=[input_x], outputs=[lstm])
+
+    _, fname = tempfile.mkstemp('.h5')
+    model.save(fname)
+
+    loaded_model = load_model(fname)
+    os.remove(fname)
 
 
 if __name__ == '__main__':

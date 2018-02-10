@@ -1,4 +1,7 @@
+"""Callbacks: utilities called at certain points during model training.
+"""
 from __future__ import absolute_import
+from __future__ import division
 from __future__ import print_function
 
 import os
@@ -15,15 +18,12 @@ from collections import OrderedDict
 from collections import Iterable
 from .utils.generic_utils import Progbar
 from . import backend as K
+from .engine.topology import Layer
 
 try:
     import requests
 except ImportError:
     requests = None
-
-if K.backend() == 'tensorflow':
-    import tensorflow as tf
-    from tensorflow.contrib.tensorboard.plugins import projector
 
 
 class CallbackList(object):
@@ -172,6 +172,7 @@ class Callback(object):
 
     def __init__(self):
         self.validation_data = None
+        self.model = None
 
     def set_params(self, params):
         self.params = params
@@ -202,7 +203,19 @@ class BaseLogger(Callback):
     """Callback that accumulates epoch averages of metrics.
 
     This callback is automatically applied to every Keras model.
+
+    # Arguments
+        stateful_metrics: Iterable of string names of metrics that
+            should *not* be averaged over an epoch.
+            Metrics in this list will be logged as-is in `on_epoch_end`.
+            All others will be averaged in `on_epoch_end`.
     """
+
+    def __init__(self, stateful_metrics=None):
+        if stateful_metrics:
+            self.stateful_metrics = set(stateful_metrics)
+        else:
+            self.stateful_metrics = set()
 
     def on_epoch_begin(self, epoch, logs=None):
         self.seen = 0
@@ -214,21 +227,28 @@ class BaseLogger(Callback):
         self.seen += batch_size
 
         for k, v in logs.items():
-            if k in self.totals:
-                self.totals[k] += v * batch_size
+            if k in self.stateful_metrics:
+                self.totals[k] = v
             else:
-                self.totals[k] = v * batch_size
+                if k in self.totals:
+                    self.totals[k] += v * batch_size
+                else:
+                    self.totals[k] = v * batch_size
 
     def on_epoch_end(self, epoch, logs=None):
         if logs is not None:
             for k in self.params['metrics']:
                 if k in self.totals:
                     # Make value available to next callbacks.
-                    logs[k] = self.totals[k] / self.seen
+                    if k in self.stateful_metrics:
+                        logs[k] = self.totals[k]
+                    else:
+                        logs[k] = self.totals[k] / self.seen
 
 
 class TerminateOnNaN(Callback):
-    """Callback that terminates training when a NaN loss is encountered."""
+    """Callback that terminates training when a NaN loss is encountered.
+    """
 
     def __init__(self):
         super(TerminateOnNaN, self).__init__()
@@ -248,13 +268,18 @@ class ProgbarLogger(Callback):
     # Arguments
         count_mode: One of "steps" or "samples".
             Whether the progress bar should
-            count samples seens or steps (batches) seen.
+            count samples seen or steps (batches) seen.
+        stateful_metrics: Iterable of string names of metrics that
+            should *not* be averaged over an epoch.
+            Metrics in this list will be logged as-is.
+            All others will be averaged over time (e.g. loss, etc).
 
     # Raises
         ValueError: In case of invalid `count_mode`.
     """
 
-    def __init__(self, count_mode='samples'):
+    def __init__(self, count_mode='samples',
+                 stateful_metrics=None):
         super(ProgbarLogger, self).__init__()
         if count_mode == 'samples':
             self.use_steps = False
@@ -262,6 +287,10 @@ class ProgbarLogger(Callback):
             self.use_steps = True
         else:
             raise ValueError('Unknown `count_mode`: ' + str(count_mode))
+        if stateful_metrics:
+            self.stateful_metrics = set(stateful_metrics)
+        else:
+            self.stateful_metrics = set()
 
     def on_train_begin(self, logs=None):
         self.verbose = self.params['verbose']
@@ -276,7 +305,8 @@ class ProgbarLogger(Callback):
                 target = self.params['samples']
             self.target = target
             self.progbar = Progbar(target=self.target,
-                                   verbose=self.verbose)
+                                   verbose=self.verbose,
+                                   stateful_metrics=self.stateful_metrics)
         self.seen = 0
 
     def on_batch_begin(self, batch, logs=None):
@@ -306,7 +336,7 @@ class ProgbarLogger(Callback):
             if k in logs:
                 self.log_values.append((k, logs[k]))
         if self.verbose:
-            self.progbar.update(self.seen, self.log_values, force=True)
+            self.progbar.update(self.seen, self.log_values)
 
 
 class History(Callback):
@@ -397,7 +427,7 @@ class ModelCheckpoint(Callback):
         self.epochs_since_last_save += 1
         if self.epochs_since_last_save >= self.period:
             self.epochs_since_last_save = 0
-            filepath = self.filepath.format(epoch=epoch, **logs)
+            filepath = self.filepath.format(epoch=epoch + 1, **logs)
             if self.save_best_only:
                 current = logs.get(self.monitor)
                 if current is None:
@@ -406,9 +436,9 @@ class ModelCheckpoint(Callback):
                 else:
                     if self.monitor_op(current, self.best):
                         if self.verbose > 0:
-                            print('Epoch %05d: %s improved from %0.5f to %0.5f,'
+                            print('\nEpoch %05d: %s improved from %0.5f to %0.5f,'
                                   ' saving model to %s'
-                                  % (epoch, self.monitor, self.best,
+                                  % (epoch + 1, self.monitor, self.best,
                                      current, filepath))
                         self.best = current
                         if self.save_weights_only:
@@ -417,11 +447,11 @@ class ModelCheckpoint(Callback):
                             self.model.save(filepath, overwrite=True)
                     else:
                         if self.verbose > 0:
-                            print('Epoch %05d: %s did not improve' %
-                                  (epoch, self.monitor))
+                            print('\nEpoch %05d: %s did not improve' %
+                                  (epoch + 1, self.monitor))
             else:
                 if self.verbose > 0:
-                    print('Epoch %05d: saving model to %s' % (epoch, filepath))
+                    print('\nEpoch %05d: saving model to %s' % (epoch + 1, filepath))
                 if self.save_weights_only:
                     self.model.save_weights(filepath, overwrite=True)
                 else:
@@ -462,7 +492,7 @@ class EarlyStopping(Callback):
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('EarlyStopping mode %s is unknown, '
-                          'fallback to auto mode.' % (self.mode),
+                          'fallback to auto mode.' % mode,
                           RuntimeWarning)
             mode = 'auto'
 
@@ -471,7 +501,7 @@ class EarlyStopping(Callback):
         elif mode == 'max':
             self.monitor_op = np.greater
         else:
-            if 'acc' in self.monitor or self.monitor.startswith('fmeasure'):
+            if 'acc' in self.monitor:
                 self.monitor_op = np.greater
             else:
                 self.monitor_op = np.less
@@ -495,19 +525,19 @@ class EarlyStopping(Callback):
                 'which is not available. Available metrics are: %s' %
                 (self.monitor, ','.join(list(logs.keys()))), RuntimeWarning
             )
-
+            return
         if self.monitor_op(current - self.min_delta, self.best):
             self.best = current
             self.wait = 0
         else:
+            self.wait += 1
             if self.wait >= self.patience:
                 self.stopped_epoch = epoch
                 self.model.stop_training = True
-            self.wait += 1
 
     def on_train_end(self, logs=None):
         if self.stopped_epoch > 0 and self.verbose > 0:
-            print('Epoch %05d: early stopping' % (self.stopped_epoch))
+            print('Epoch %05d: early stopping' % (self.stopped_epoch + 1))
 
 
 class RemoteMonitor(Callback):
@@ -545,7 +575,10 @@ class RemoteMonitor(Callback):
         send = {}
         send['epoch'] = epoch
         for k, v in logs.items():
-            send[k] = v
+            if isinstance(v, (np.ndarray, np.generic)):
+                send[k] = v.item()
+            else:
+                send[k] = v
         try:
             requests.post(self.root + self.path,
                           {self.field: json.dumps(send)},
@@ -560,26 +593,35 @@ class LearningRateScheduler(Callback):
 
     # Arguments
         schedule: a function that takes an epoch index as input
-            (integer, indexed from 0) and returns a new
-            learning rate as output (float).
+            (integer, indexed from 0) and current learning rate
+            and returns a new learning rate as output (float).
+        verbose: int. 0: quiet, 1: update messages.
     """
 
-    def __init__(self, schedule):
+    def __init__(self, schedule, verbose=0):
         super(LearningRateScheduler, self).__init__()
         self.schedule = schedule
+        self.verbose = verbose
 
     def on_epoch_begin(self, epoch, logs=None):
         if not hasattr(self.model.optimizer, 'lr'):
             raise ValueError('Optimizer must have a "lr" attribute.')
-        lr = self.schedule(epoch)
+        lr = float(K.get_value(self.model.optimizer.lr))
+        try:  # new API
+            lr = self.schedule(epoch, lr=lr)
+        except TypeError:  # old API for backward compatibility
+            lr = self.schedule(epoch)
         if not isinstance(lr, (float, np.float32, np.float64)):
             raise ValueError('The output of the "schedule" function '
                              'should be float.')
         K.set_value(self.model.optimizer.lr, lr)
+        if self.verbose > 0:
+            print('\nEpoch %05d: LearningRateScheduler reducing learning '
+                  'rate to %s.' % (epoch + 1, lr))
 
 
 class TensorBoard(Callback):
-    """Tensorboard basic visualizations.
+    """TensorBoard basic visualizations.
 
     [TensorBoard](https://www.tensorflow.org/get_started/summaries_and_tensorboard)
     is a visualization tool provided with TensorFlow.
@@ -591,9 +633,13 @@ class TensorBoard(Callback):
 
     If you have installed TensorFlow with pip, you should be able
     to launch TensorBoard from the command line:
-    ```
+    ```sh
     tensorboard --logdir=/full_path_to_your_logs
     ```
+
+    When using a backend other than TensorFlow, TensorBoard will still work
+    (if you have TensorFlow installed), but the only feature available will
+    be the display of the losses and metrics plots.
 
     # Arguments
         log_dir: the path of the directory where to save the log
@@ -632,9 +678,31 @@ class TensorBoard(Callback):
                  embeddings_layer_names=None,
                  embeddings_metadata=None):
         super(TensorBoard, self).__init__()
+        global tf, projector
+        try:
+            import tensorflow as tf
+            from tensorflow.contrib.tensorboard.plugins import projector
+        except ImportError:
+            raise ImportError('You need the TensorFlow module installed to use TensorBoard.')
+
         if K.backend() != 'tensorflow':
-            raise RuntimeError('TensorBoard callback only works '
-                               'with the TensorFlow backend.')
+            if histogram_freq != 0:
+                warnings.warn('You are not using the TensorFlow backend. '
+                              'histogram_freq was set to 0')
+                histogram_freq = 0
+            if write_graph:
+                warnings.warn('You are not using the TensorFlow backend. '
+                              'write_graph was set to False')
+                write_graph = False
+            if write_images:
+                warnings.warn('You are not using the TensorFlow backend. '
+                              'write_images was set to False')
+                write_images = False
+            if embeddings_freq != 0:
+                warnings.warn('You are not using the TensorFlow backend. '
+                              'embeddings_freq was set to 0')
+                embeddings_freq = 0
+
         self.log_dir = log_dir
         self.histogram_freq = histogram_freq
         self.merged = None
@@ -648,7 +716,8 @@ class TensorBoard(Callback):
 
     def set_model(self, model):
         self.model = model
-        self.sess = K.get_session()
+        if K.backend() == 'tensorflow':
+            self.sess = K.get_session()
         if self.histogram_freq and self.merged is None:
             for layer in self.model.layers:
 
@@ -658,6 +727,12 @@ class TensorBoard(Callback):
                     if self.write_grads:
                         grads = model.optimizer.get_gradients(model.total_loss,
                                                               weight)
+
+                        def is_indexed_slices(grad):
+                            return type(grad).__name__ == 'IndexedSlices'
+                        grads = [
+                            grad.values if is_indexed_slices(grad) else grad
+                            for grad in grads]
                         tf.summary.histogram('{}_grad'.format(mapped_weight_name), grads)
                     if self.write_images:
                         w_img = tf.squeeze(weight)
@@ -741,6 +816,9 @@ class TensorBoard(Callback):
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
 
+        if not self.validation_data and self.histogram_freq:
+            raise ValueError('If printing histograms, validation_data must be '
+                             'provided, and cannot be a generator.')
         if self.validation_data and self.histogram_freq:
             if epoch % self.histogram_freq == 0:
 
@@ -757,12 +835,13 @@ class TensorBoard(Callback):
                 i = 0
                 while i < val_size:
                     step = min(self.batch_size, val_size - i)
-                    batch_val = []
-                    batch_val.append(val_data[0][i:i + step])
-                    batch_val.append(val_data[1][i:i + step])
-                    batch_val.append(val_data[2][i:i + step])
                     if self.model.uses_learning_phase:
-                        batch_val.append(val_data[3])
+                        # do not slice the learning phase
+                        batch_val = [x[i:i + step] for x in val_data[:-1]]
+                        batch_val.append(val_data[-1])
+                    else:
+                        batch_val = [x[i:i + step] for x in val_data]
+                    assert len(batch_val) == len(tensors)
                     feed_dict = dict(zip(tensors, batch_val))
                     result = self.sess.run([self.merged], feed_dict=feed_dict)
                     summary_str = result[0]
@@ -798,11 +877,12 @@ class ReduceLROnPlateau(Callback):
     of epochs, the learning rate is reduced.
 
     # Example
-        ```python
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2,
-                                      patience=5, min_lr=0.001)
-        model.fit(X_train, Y_train, callbacks=[reduce_lr])
-        ```
+
+    ```python
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2,
+                                  patience=5, min_lr=0.001)
+    model.fit(X_train, Y_train, callbacks=[reduce_lr])
+    ```
 
     # Arguments
         monitor: quantity to be monitored.
@@ -863,7 +943,6 @@ class ReduceLROnPlateau(Callback):
             self.best = -np.Inf
         self.cooldown_counter = 0
         self.wait = 0
-        self.lr_epsilon = self.min_lr * 1e-4
 
     def on_train_begin(self, logs=None):
         self._reset()
@@ -873,8 +952,12 @@ class ReduceLROnPlateau(Callback):
         logs['lr'] = K.get_value(self.model.optimizer.lr)
         current = logs.get(self.monitor)
         if current is None:
-            warnings.warn('Learning Rate Plateau Reducing requires %s available!' %
-                          self.monitor, RuntimeWarning)
+            warnings.warn(
+                'Reduce LR on plateau conditioned on metric `%s` '
+                'which is not available. Available metrics are: %s' %
+                (self.monitor, ','.join(list(logs.keys()))), RuntimeWarning
+            )
+
         else:
             if self.in_cooldown():
                 self.cooldown_counter -= 1
@@ -886,12 +969,13 @@ class ReduceLROnPlateau(Callback):
             elif not self.in_cooldown():
                 if self.wait >= self.patience:
                     old_lr = float(K.get_value(self.model.optimizer.lr))
-                    if old_lr > self.min_lr + self.lr_epsilon:
+                    if old_lr > self.min_lr:
                         new_lr = old_lr * self.factor
                         new_lr = max(new_lr, self.min_lr)
                         K.set_value(self.model.optimizer.lr, new_lr)
                         if self.verbose > 0:
-                            print('\nEpoch %05d: reducing learning rate to %s.' % (epoch, new_lr))
+                            print('\nEpoch %05d: ReduceLROnPlateau reducing learning '
+                                  'rate to %s.' % (epoch + 1, new_lr))
                         self.cooldown_counter = self.cooldown
                         self.wait = 0
                 self.wait += 1
@@ -907,10 +991,11 @@ class CSVLogger(Callback):
     including 1D iterables such as np.ndarray.
 
     # Example
-        ```python
-        csv_logger = CSVLogger('training.log')
-        model.fit(X_train, Y_train, callbacks=[csv_logger])
-        ```
+
+    ```python
+    csv_logger = CSVLogger('training.log')
+    model.fit(X_train, Y_train, callbacks=[csv_logger])
+    ```
 
     # Arguments
         filename: filename of the csv file, e.g. 'run/log.csv'.
@@ -950,9 +1035,14 @@ class CSVLogger(Callback):
             else:
                 return k
 
-        if not self.writer:
+        if self.keys is None:
             self.keys = sorted(logs.keys())
 
+        if self.model.stop_training:
+            # We set NA so that csv parsers do not fail for this last epoch.
+            logs = dict([(k, logs[k]) if k in logs else (k, 'NA') for k in self.keys])
+
+        if not self.writer:
             class CustomDialect(csv.excel):
                 delimiter = self.sep
 
@@ -994,32 +1084,33 @@ class LambdaCallback(Callback):
         on_train_end: called at the end of model training.
 
     # Example
-        ```python
-        # Print the batch number at the beginning of every batch.
-        batch_print_callback = LambdaCallback(
-            on_batch_begin=lambda batch,logs: print(batch))
 
-        # Stream the epoch loss to a file in JSON format. The file content
-        # is not well-formed JSON but rather has a JSON object per line.
-        import json
-        json_log = open('loss_log.json', mode='wt', buffering=1)
-        json_logging_callback = LambdaCallback(
-            on_epoch_end=lambda epoch, logs: json_log.write(
-                json.dumps({'epoch': epoch, 'loss': logs['loss']}) + '\n'),
-            on_train_end=lambda logs: json_log.close()
-        )
+    ```python
+    # Print the batch number at the beginning of every batch.
+    batch_print_callback = LambdaCallback(
+        on_batch_begin=lambda batch,logs: print(batch))
 
-        # Terminate some processes after having finished model training.
-        processes = ...
-        cleanup_callback = LambdaCallback(
-            on_train_end=lambda logs: [
-                p.terminate() for p in processes if p.is_alive()])
+    # Stream the epoch loss to a file in JSON format. The file content
+    # is not well-formed JSON but rather has a JSON object per line.
+    import json
+    json_log = open('loss_log.json', mode='wt', buffering=1)
+    json_logging_callback = LambdaCallback(
+        on_epoch_end=lambda epoch, logs: json_log.write(
+            json.dumps({'epoch': epoch, 'loss': logs['loss']}) + '\n'),
+        on_train_end=lambda logs: json_log.close()
+    )
 
-        model.fit(...,
-                  callbacks=[batch_print_callback,
-                             json_logging_callback,
-                             cleanup_callback])
-        ```
+    # Terminate some processes after having finished model training.
+    processes = ...
+    cleanup_callback = LambdaCallback(
+        on_train_end=lambda logs: [
+            p.terminate() for p in processes if p.is_alive()])
+
+    model.fit(...,
+              callbacks=[batch_print_callback,
+                         json_logging_callback,
+                         cleanup_callback])
+    ```
     """
 
     def __init__(self,

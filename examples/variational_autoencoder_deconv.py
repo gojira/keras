@@ -1,13 +1,18 @@
 '''This script demonstrates how to build a variational autoencoder
 with Keras and deconvolution layers.
 
-Reference: "Auto-Encoding Variational Bayes" https://arxiv.org/abs/1312.6114
+# Reference
+
+- Auto-Encoding Variational Bayes
+  https://arxiv.org/abs/1312.6114
 '''
+from __future__ import print_function
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 
-from keras.layers import Input, Dense, Lambda, Flatten, Reshape, Layer
+from keras.layers import Input, Dense, Lambda, Flatten, Reshape
 from keras.layers import Conv2D, Conv2DTranspose
 from keras.models import Model
 from keras import backend as K
@@ -31,7 +36,7 @@ intermediate_dim = 128
 epsilon_std = 1.0
 epochs = 5
 
-x = Input(batch_shape=(batch_size,) + original_img_size)
+x = Input(shape=original_img_size)
 conv_1 = Conv2D(img_chns,
                 kernel_size=(2, 2),
                 padding='same', activation='relu')(x)
@@ -56,7 +61,7 @@ z_log_var = Dense(latent_dim)(hidden)
 
 def sampling(args):
     z_mean, z_log_var = args
-    epsilon = K.random_normal(shape=(batch_size, latent_dim),
+    epsilon = K.random_normal(shape=(K.shape(z_mean)[0], latent_dim),
                               mean=0., stddev=epsilon_std)
     return z_mean + K.exp(z_log_var) * epsilon
 
@@ -79,7 +84,8 @@ decoder_deconv_1 = Conv2DTranspose(filters,
                                    padding='same',
                                    strides=1,
                                    activation='relu')
-decoder_deconv_2 = Conv2DTranspose(filters, num_conv,
+decoder_deconv_2 = Conv2DTranspose(filters,
+                                   kernel_size=num_conv,
                                    padding='same',
                                    strides=1,
                                    activation='relu')
@@ -105,32 +111,18 @@ deconv_2_decoded = decoder_deconv_2(deconv_1_decoded)
 x_decoded_relu = decoder_deconv_3_upsamp(deconv_2_decoded)
 x_decoded_mean_squash = decoder_mean_squash(x_decoded_relu)
 
+# instantiate VAE model
+vae = Model(x, x_decoded_mean_squash)
 
-# Custom loss layer
-class CustomVariationalLayer(Layer):
-    def __init__(self, **kwargs):
-        self.is_placeholder = True
-        super(CustomVariationalLayer, self).__init__(**kwargs)
+# Compute VAE loss
+xent_loss = img_rows * img_cols * metrics.binary_crossentropy(
+    K.flatten(x),
+    K.flatten(x_decoded_mean_squash))
+kl_loss = - 0.5 * K.sum(1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
+vae_loss = K.mean(xent_loss + kl_loss)
+vae.add_loss(vae_loss)
 
-    def vae_loss(self, x, x_decoded_mean_squash):
-        x = K.flatten(x)
-        x_decoded_mean_squash = K.flatten(x_decoded_mean_squash)
-        xent_loss = img_rows * img_cols * metrics.binary_crossentropy(x, x_decoded_mean_squash)
-        kl_loss = - 0.5 * K.mean(1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
-        return K.mean(xent_loss + kl_loss)
-
-    def call(self, inputs):
-        x = inputs[0]
-        x_decoded_mean_squash = inputs[1]
-        loss = self.vae_loss(x, x_decoded_mean_squash)
-        self.add_loss(loss, inputs=inputs)
-        # We don't use this output.
-        return x
-
-
-y = CustomVariationalLayer()([x, x_decoded_mean_squash])
-vae = Model(x, y)
-vae.compile(optimizer='rmsprop', loss=None)
+vae.compile(optimizer='rmsprop')
 vae.summary()
 
 # train the VAE on MNIST digits
@@ -147,7 +139,7 @@ vae.fit(x_train,
         shuffle=True,
         epochs=epochs,
         batch_size=batch_size,
-        validation_data=(x_test, x_test))
+        validation_data=(x_test, None))
 
 # build a model to project inputs on the latent space
 encoder = Model(x, z_mean)

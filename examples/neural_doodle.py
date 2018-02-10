@@ -1,41 +1,44 @@
 '''Neural doodle with Keras
 
-Script Usage:
-    # Arguments:
-    ```
-    --nlabels:              # of regions (colors) in mask images
-    --style-image:          image to learn style from
-    --style-mask:           semantic labels for style image
-    --target-mask:          semantic labels for target image (your doodle)
-    --content-image:        optional image to learn content from
-    --target-image-prefix:  path prefix for generated target images
-    ```
+# Script Usage
 
-    # Example 1: doodle using a style image, style mask
-    and target mask.
-    ```
-    python neural_doodle.py --nlabels 4 --style-image Monet/style.png \
-    --style-mask Monet/style_mask.png --target-mask Monet/target_mask.png \
-    --target-image-prefix generated/monet
-    ```
+## Arguments
+```
+--nlabels:              # of regions (colors) in mask images
+--style-image:          image to learn style from
+--style-mask:           semantic labels for style image
+--target-mask:          semantic labels for target image (your doodle)
+--content-image:        optional image to learn content from
+--target-image-prefix:  path prefix for generated target images
+```
 
-    # Example 2: doodle using a style image, style mask,
-    target mask and an optional content image.
-    ```
-    python neural_doodle.py --nlabels 4 --style-image Renoir/style.png \
-    --style-mask Renoir/style_mask.png --target-mask Renoir/target_mask.png \
-    --content-image Renoir/creek.jpg \
-    --target-image-prefix generated/renoir
-    ```
+## Example 1: doodle using a style image, style mask
+and target mask.
+```
+python neural_doodle.py --nlabels 4 --style-image Monet/style.png \
+--style-mask Monet/style_mask.png --target-mask Monet/target_mask.png \
+--target-image-prefix generated/monet
+```
 
-References:
-[Dmitry Ulyanov's blog on fast-neural-doodle](http://dmitryulyanov.github.io/feed-forward-neural-doodle/)
-[Torch code for fast-neural-doodle](https://github.com/DmitryUlyanov/fast-neural-doodle)
-[Torch code for online-neural-doodle](https://github.com/DmitryUlyanov/online-neural-doodle)
-[Paper Texture Networks: Feed-forward Synthesis of Textures and Stylized Images](http://arxiv.org/abs/1603.03417)
-[Discussion on parameter tuning](https://github.com/fchollet/keras/issues/3705)
+## Example 2: doodle using a style image, style mask,
+target mask and an optional content image.
+```
+python neural_doodle.py --nlabels 4 --style-image Renoir/style.png \
+--style-mask Renoir/style_mask.png --target-mask Renoir/target_mask.png \
+--content-image Renoir/creek.jpg \
+--target-image-prefix generated/renoir
+```
 
-Resources:
+# References
+
+- [Dmitry Ulyanov's blog on fast-neural-doodle](http://dmitryulyanov.github.io/feed-forward-neural-doodle/)
+- [Torch code for fast-neural-doodle](https://github.com/DmitryUlyanov/fast-neural-doodle)
+- [Torch code for online-neural-doodle](https://github.com/DmitryUlyanov/online-neural-doodle)
+- [Paper Texture Networks: Feed-forward Synthesis of Textures and Stylized Images](http://arxiv.org/abs/1603.03417)
+- [Discussion on parameter tuning](https://github.com/keras-team/keras/issues/3705)
+
+# Resources
+
 Example images can be downloaded from
 https://github.com/DmitryUlyanov/fast-neural-doodle/tree/master/data
 '''
@@ -154,9 +157,9 @@ def load_mask_labels():
                                img_ncols:].reshape((img_nrows, img_ncols))
 
     stack_axis = 0 if K.image_data_format() == 'channels_first' else -1
-    style_mask = np.stack([style_mask_label == r for r in xrange(num_labels)],
+    style_mask = np.stack([style_mask_label == r for r in range(num_labels)],
                           axis=stack_axis)
-    target_mask = np.stack([target_mask_label == r for r in xrange(num_labels)],
+    target_mask = np.stack([target_mask_label == r for r in range(num_labels)],
                            axis=stack_axis)
 
     return (np.expand_dims(style_mask, axis=0),
@@ -251,7 +254,7 @@ def style_loss(style_image, target_image, style_masks, target_masks):
     assert 3 == K.ndim(style_image) == K.ndim(target_image)
     assert 3 == K.ndim(style_masks) == K.ndim(target_masks)
     loss = K.variable(0)
-    for i in xrange(num_labels):
+    for i in range(num_labels):
         if K.image_data_format() == 'channels_first':
             style_mask = style_masks[i, :, :]
             target_mask = target_masks[i, :, :]
